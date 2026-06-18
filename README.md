@@ -12,6 +12,6 @@ Proyek ini merupakan aplikasi deteksi masker wajah secara *real-time* menggunaka
 ## 📂 Struktur Proyek
 ```text
 ├── sample/               # Folder tempat menyimpan hasil snapshot foto (auto-generated)
-├── best.pt               # File bobot model kustom YOLOv8 Nano
+├── model/best.pt         # File bobot model kustom YOLOv8 Nano
 ├── deteksi_masker.ipynb  # Jupyter Notebook utama untuk eksekusi program
 └── README.md             # Dokumentasi teknis proyek

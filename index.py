@@ -10,7 +10,7 @@ if not os.path.exists(output_folder):
     print(f"Folder '{output_folder}' berhasil dibuat.")
 
 # 2. Load Model dengan Handle Error
-model_path = "best.pt"
+model_path = "model/best.pt"
 try:
     model = YOLO(model_path)
     print(f"Model {model_path} berhasil dimuat.")
@@ -30,7 +30,7 @@ try:
     print("Kamera berhasil dibuka.")
     print("-" * 50)
     print("KONTROL KEYBOARD:")
-    print("Tehan 's' -> Untuk mengambil foto & simpan sampel hasil deteksi")
+    print("Tahan 's' -> Untuk mengambil foto & simpan sampel hasil deteksi")
     print("Tekan 'q' -> Untuk keluar dari program")
     print("-" * 50)
 except Exception as e:
