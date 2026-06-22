@@ -1,97 +1,123 @@
+import base64
 import os
 import cv2
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from ultralytics import YOLO
 
-# 1. Konfigurasi Folder Penyimpanan Sampel
-# Menggunakan folder 'sample' di direktori yang sama dengan notebook
-output_folder = "sample"
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
-    print(f"Folder '{output_folder}' berhasil dibuat.")
+# Inisialisasi FastAPI
+app = FastAPI(title="YOLOv8 Mask Detection Backend")
 
-# 2. Load Model dengan Handle Error
-model_path = "model/best.pt"
+# Konfigurasi CORS
+# Agar Frontend Vite (biasanya port 5173) diizinkan mengakses Backend FastAPI (port 8000)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "*",
+    ],  # Mengizinkan frontend lokal
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Buat folder 'sample' otomatis jika belum ada di lokal
+if not os.path.exists("sample"):
+    os.makedirs("sample")
+
+# Load model YOLOv8 kustom milik temanmu
 try:
-    model = YOLO(model_path)
-    print(f"Model {model_path} berhasil dimuat.")
+    model = YOLO("model/best.pt")
+    print("Model YOLOv8 kustom berhasil dimuat!")
 except Exception as e:
-    print(
-        f"Error: Gagal memuat model '{model_path}'. Pastikan file berada di folder yang sama."
-    )
-    print(f"Detail Error: {e}")
-    # Berhenti jika model tidak ditemukan
-    raise SystemExit
+    print(f"Gagal memuat model. Periksa jalur 'model/best.pt'. Detail: {e}")
 
-# 3. Akses Kamera Laptop dengan Handle Error
-try:
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise IOError("Kamera tidak merespon atau sedang digunakan aplikasi lain.")
-    print("Kamera berhasil dibuka.")
-    print("-" * 50)
-    print("KONTROL KEYBOARD:")
-    print("Tahan 's' -> Untuk mengambil foto & simpan sampel hasil deteksi")
-    print("Tekan 'q' -> Untuk keluar dari program")
-    print("-" * 50)
-except Exception as e:
-    print(f"Error Kamera: {e}")
-    raise SystemExit
 
-# Penghitung untuk nama file foto agar tidak duplikat
-photo_counter = 0
+# web-socket config
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("Frontend React terhubung ke saluran WebSocket")
 
-# 4. Loop Utama Real-time
-while cap.isOpened():
     try:
-        success, frame = cap.read()
+        while True:
+            # Menerima string Base64 dari React
+            data = await websocket.receive_text()
 
-        if not success:
-            print("Error: Gagal membaca frame dari kamera. Menghentikan...")
-            break
+            # Prapemrosesan: Bersihkan header Base64 jika ada (e.g., 'data:image/jpeg;base64,')
+            encoded_data = data.split(",")[1] if "," in data else data
 
-        # Jalankan inferensi YOLOv8
-        results = model(frame, stream=True)
+            # Konversi string Base64 menjadi format matriks gambar OpenCV
+            nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Visualisasikan hasil deteksi ke frame asli
-        annotated_frame = frame.copy()  # fallback jika plot gagal
-        for r in results:
-            annotated_frame = r.plot()
+            if frame is not None:
+                # Jalankan inferensi YOLOv8 pada frame tersebut
+                results = model(frame, stream=True)
+                detections = []
 
-        # Tampilkan hasil ke jendela OpenCV
-        cv2.imshow("Deteksi Masker Real-time - YOLOv8", annotated_frame)
+                for r in results:
+                    for box in r.boxes:
+                        # Ambil koordinat boks [x1, y1, x2, y2]
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        conf = float(box.conf[0])  # Skor akurasi (0.0 - 1.0)
+                        cls = int(box.cls[0])  # Indeks kelas
+                        label = model.names[cls]  # Nama kelas (cth: 'mask', 'no-mask')
 
-        # Membaca input keyboard (menunggu 1 ms)
-        key = cv2.waitKey(1) & 0xFF
+                        # Bungkus ke dalam list dictionary
+                        detections.append(
+                            {
+                                "bbox": [x1, y1, x2, y2],
+                                "confidence": conf,
+                                "class": label,
+                            }
+                        )
 
-        # --- FITUR 1: Keluar Program (Tekan 'q') ---
-        if key == ord("q"):
-            print("Menutup program atas permintaan pengguna...")
-            break
+                # E. Kirim kembali hasil koordinat dalam format JSON ke React
+                await websocket.send_json({"status": "success", "data": detections})
 
-        # --- FITUR 2: Ambil Foto Sampel (Tekan 's') ---
-        elif key == ord("s"):
-            # Membuat nama file unik berdasarkan urutan/counter
-            # Kamu juga bisa menggantinya dengan format waktu (timestamp)
-            filename = f"sample_mask_{photo_counter}.jpg"
-            filepath = os.path.join(output_folder, filename)
+    except WebSocketDisconnect:
+        print("Koneksi WebSocket diputus oleh Frontend.")
+    except Exception as e:
+        print(f"Terjadi kesalahan pada WebSocket: {e}")
 
-            # Pastikan file tidak menimpa yang sudah ada
-            while os.path.exists(filepath):
-                photo_counter += 1
-                filename = f"sample_mask_{photo_counter}.jpg"
-                filepath = os.path.join(output_folder, filename)
+# API endpoint
+# Skema data (pydantic) untuk memvalidasi data masuk dari HTTP POST
+class SnapshotRequest(BaseModel):
+    image: str  # Frontend wajib mengirim JSON berupa {"image": "string_base64"}
 
-            # Menyimpan bingkai yang sudah ada kotak deteksinya (annotated_frame)
-            # Jika ingin menyimpan foto polos tanpa kotak, ganti menjadi cv2.imwrite(filepath, frame)
-            cv2.imwrite(filepath, annotated_frame)
-            print(f"[SUKSES] Sampel disimpan ke: {filepath}")
-            photo_counter += 1
+
+@app.post("/api/save-sample")
+async def save_sample(request: SnapshotRequest):
+    try:
+        # Bersihkan string Base64
+        encoded_data = (
+            request.image.split(",")[1]
+            if "," in request.image
+            else request.image
+        )
+
+        # Konversi menjadi gambar OpenCV
+        nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is not None:
+            # Beri nama file unik berdasarkan total file di folder sample
+            total_files = len(os.listdir("sample"))
+            filename = f"sample/snapshot_{total_files + 1}.jpg"
+
+            # Simpan fisik file gambar ke folder lokal /sample
+            cv2.imwrite(filename, frame)
+
+            return {
+                "status": "success",
+                "message": f"Gambar sampel berhasil disimpan sebagai {filename}!",
+            }
+
+        return {"status": "error", "message": "Format gambar tidak valid."}
 
     except Exception as e:
-        print(f"\nTerjadi error saat runtime: {e}")
-        break
-
-# 5. Bersihkan Proses
-cap.release()
-cv2.destroyAllWindows()
-print("Kamera ditutup dan semua jendela OpenCV dibersihkan.")
+        return {"status": "error", "message": f"Gagal menyimpan: {str(e)}"}
