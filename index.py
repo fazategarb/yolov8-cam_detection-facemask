@@ -13,7 +13,7 @@ from ultralytics import YOLO
 # Inisialisasi FastAPI
 app = FastAPI(title="YOLOv8 Mask Detection Backend")
 
-# Konfigurasi CORS (Sudah terbuka untuk kebutuhan development frontend baru)
+# Konfigurasi CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -30,34 +30,37 @@ app.add_middleware(
 if not os.path.exists("sample"):
     os.makedirs("sample")
 
-# Variabel global untuk mencatat waktu terakhir sampel disimpan (Anti-Spam)
+# Variabel global anti-spam untuk endpoint HTTP POST
 last_saved_time = 0.0
 
-# Load model YOLOv8 kustom - CRITICAL HANDLING
+# Load model YOLOv8 kustom
 MODEL_PATH = "model/best.pt"
 try:
-    # Memuat model sekali saja saat server dinyalakan
     model = YOLO(MODEL_PATH)
     print("✅ Model YOLOv8 kustom berhasil dimuat!")
+    print(f"📊 Kelas yang terdeteksi di model: {model.names}") 
+    # Ini akan memunculkan {0: 'Incorrect_Mask', 1: 'with_Mask', 2: 'without_Mask'} di terminal
 except Exception as e:
-    print(
-        f"❌ GAGAL MEMUAT MODEL! Periksa file di '{MODEL_PATH}'. Sistem dihentikan.\nDetail: {e}"
-    )
+    print(f"❌ GAGAL MEMUAT MODEL! Periksa file di '{MODEL_PATH}'. Sistem dihentikan.\nDetail: {e}")
     sys.exit(1)
 
 
-# Fungsi pembantu untuk memproses YOLO di background thread (Meringankan Kinerja)
+# Fungsi pembantu untuk memproses YOLO di background thread
 def predict_frame(frame):
-    results = model(
-        frame, stream=True, verbose=False
-    )  # verbose=False mengurangi log sampah di terminal
+    results = model(frame, stream=True, verbose=False)
     detections = []
     for r in results:
         for box in r.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             conf = float(box.conf[0])
             cls = int(box.cls[0])
-            label = model.names[cls]
+            
+            # Mengambil nama asli dari model
+            raw_label = model.names[cls]
+            
+            # Ubah ke huruf kecil dan format konsisten agar frontend mudah membaca
+            # 'with_Mask' -> 'with_mask', 'without_Mask' -> 'without_mask', 'Incorrect_Mask' -> 'incorrect_mask'
+            label = raw_label.lower().replace(" ", "_")
 
             detections.append(
                 {"bbox": [x1, y1, x2, y2], "confidence": conf, "class": label}
@@ -73,24 +76,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # Menerima string Base64 dari React
             data = await websocket.receive_text()
 
             if not data:
                 continue
 
-            # Prapemrosesan Base64
             encoded_data = data.split(",")[1] if "," in data else data
-
-            # Konversi Base64 ke OpenCV Frame
             nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
             if frame is not None:
-                # Jalankan YOLO di thread pool terpisah agar loop async tidak tertahan/lag
                 detections = await run_in_threadpool(predict_frame, frame)
-
-                # Kirim kembali hasil koordinat dalam format JSON ke React
                 await websocket.send_json({"status": "success", "data": detections})
 
     except WebSocketDisconnect:
@@ -109,8 +105,7 @@ async def save_sample(request: SnapshotRequest):
     global last_saved_time
     current_time = time.time()
 
-    # FITUR ANTI-SPAM: Batasi penyimpanan maksimal 1 foto per 2 detik
-    # Jika frontend mengirim request kurang dari 2 detik dari request terakhir, abaikan.
+    # Batasi penyimpanan maksimal 1 foto per 2 detik (Anti-Spam)
     if current_time - last_saved_time < 2.0:
         return {
             "status": "ignored",
@@ -118,12 +113,7 @@ async def save_sample(request: SnapshotRequest):
         }
 
     try:
-        encoded_data = (
-            request.image.split(",")[1]
-            if "," in request.image
-            else request.image
-        )
-
+        encoded_data = request.image.split(",")[1] if "," in request.image else request.image
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -131,10 +121,7 @@ async def save_sample(request: SnapshotRequest):
             total_files = len(os.listdir("sample"))
             filename = f"sample/snapshot_{total_files + 1}.jpg"
 
-            # Jalankan penulisan file I/O secara async di background
             await run_in_threadpool(cv2.imwrite, filename, frame)
-
-            # Perbarui timestamp waktu penyimpanan terakhir yang sukses
             last_saved_time = current_time
 
             return {
